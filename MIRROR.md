@@ -9,8 +9,8 @@ Every file here that the package also ships is byte-identical to what
 `npm pack buddybrawl` downloads, because it *is* that tarball, extracted. Check it:
 
 ```bash
-npm pack buddybrawl@1.0.21
-tar -xzf buddybrawl-1.0.21.tgz
+npm pack buddybrawl@1.0.22
+tar -xzf buddybrawl-1.0.22.tgz
 git clone https://github.com/igormiklos/buddybrawl-cli.git mirror
 diff -r package mirror -x MIRROR.md -x SECURITY.md -x .gitattributes -x .git   # expect no output
 ```

@@ -109,7 +109,17 @@ No source code is transmitted. The hook ships as readable, unminified source —
 
 **Stopping, and deleting.** `npx buddybrawl uninstall` unregisters the hook, deletes `~/.buddybrawl`, and asks the server to deactivate this install's sync token so it stops working even for someone who copied it. Deleting the folder by hand does the first two but not the third — the token is the part you can't retire yourself, which is why the command exists.
 
-What that leaves is the account: your buddy, its stats, gear and rank, and the session records those were computed from. Those stay on the server, because uninstalling one machine is not the same as quitting — they're kept for as long as the account exists, with no automatic expiry. To delete all of it, email hi@buddybrawl.xyz from the address on the account. It's done within 30 days and you get a confirmation when it is.
+What that leaves is the account: your buddy, its stats, gear and rank, and the session records those were computed from. Those stay on the server, because uninstalling one machine is not the same as quitting — they're kept for as long as the account exists, with no automatic expiry.
+
+To delete the account too:
+
+```
+npx buddybrawl uninstall --delete-account
+```
+
+Run it **before** a plain uninstall. Deleting is authenticated with this install's sync token, and a plain uninstall destroys that token — if you never signed in on the web, it's the only proof the account is yours. Signed in? The dashboard has a delete button, no token needed. Either way it's immediate, not a request in a queue, and email (hi@buddybrawl.xyz) still works if you've already uninstalled.
+
+Deleting removes your buddy, stats, gear, rank and session records, and destroys the link between the account and your git email — so reinstalling later starts a genuinely new buddy rather than resurrecting the old one. Battles you already fought stay in your opponents' history with you shown as "Deleted player": their record of their own games shouldn't disappear because you left.
 
 ## Security
 

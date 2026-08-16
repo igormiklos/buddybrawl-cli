@@ -60,6 +60,21 @@ function previousTokenHash() {
   }
 }
 
+// The whole config, for the one caller that needs the secret itself rather than its
+// hash: deleting an account is authenticated to the sync endpoint, which is the only
+// host that has ever been allowed to see a working credential.
+function readConfig() {
+  try {
+    let raw = fs.readFileSync(CONFIG_FILE, "utf8");
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);   // Notepad/PowerShell BOM
+    const cfg = JSON.parse(raw);
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return null;
+    return cfg;
+  } catch {
+    return null;
+  }
+}
+
 // Require https for all apiUrls (protects against http token+data leakage and malicious redirects).
 // For self-hosted use --api-url must still be https; local testing users can edit config.json.
 //
@@ -533,6 +548,56 @@ async function revokeInstallToken(tokenSha256) {
   }
 }
 
+// ─── Account deletion ────────────────────────────────────────────────────────
+
+// Built by appending to the configured apiUrl, exactly like the hook builds its sync
+// URL — and deliberately NOT from PROD_HOST. This request carries the working sync
+// secret, and the only host that has ever been allowed to see one is the endpoint
+// printed at setup and saved in config.json. Sending it to the config host instead
+// would hand a second server a live credential, which is the one thing every other
+// part of this package is arranged to prevent.
+function buildDeleteUrl(apiUrl) {
+  const url = new URL(apiUrl);
+  url.pathname = url.pathname.replace(/\/+$/, "") + "/functions/v1/delete-account";
+  return url.toString();
+}
+
+// Ask the server to delete the account this install belongs to.
+//
+// Authenticated by the install token plus the machine ID it was bound to — the same
+// pair the sync endpoint checks. That pair is the only proof of ownership someone who
+// never signed in on the web will ever have, and `uninstall` is about to destroy it,
+// which is precisely why deletion is offered here rather than only on a dashboard.
+async function deleteAccount(cfg) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const endpoint = buildDeleteUrl(cfg.apiUrl);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": `buddybrawl-cli/${PKG_VERSION}`,
+        "x-sync-secret": cfg.syncSecret,
+      },
+      // The server refuses anything without this. It is not a formality: it means a
+      // stray or replayed POST cannot delete somebody's account.
+      body: JSON.stringify({ confirm: "DELETE", machineId: cfg.machineId }),
+      signal: controller.signal,
+      redirect: "error",
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+    return {
+      deleted: body?.deleted === true,
+      reason: body?.reason ?? null,
+      battlesAnonymized: body?.battlesAnonymized ?? 0,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── Init command ────────────────────────────────────────────────────────────
 
 function hr(label) {
@@ -791,6 +856,8 @@ async function cmdInit(flags = {}) {
 // every point it can fail:
 //
 //   1. unregister the hook   — the step that actually stops data leaving the machine
+//   1b. --delete-account     — optional, and must be here: it authenticates with the
+//                              token that step 3 destroys (see cmdUninstall body)
 //   2. revoke the token      — needs config.json, so it has to happen before step 3
 //   3. delete ~/.buddybrawl  — the point of no return for step 2
 //
@@ -806,7 +873,11 @@ async function cmdInit(flags = {}) {
 async function cmdUninstall(flags = {}) {
   console.log("\n  BuddyBrawl — Uninstall");
   console.log("  Removes the Claude Code hook, the local config, and this");
-  console.log("  install's sync token.\n");
+  console.log("  install's sync token.");
+  if (flags.deleteAccount) {
+    console.log("  --delete-account: your buddy, stats, gear and rank go too.");
+  }
+  console.log();
 
   // Validated first, for the same reason init reads it first: if this file is
   // unusable we are not going to rewrite it, and nothing should have changed by the
@@ -815,6 +886,20 @@ async function cmdUninstall(flags = {}) {
   const registered = ourHooksIn(settings);
   const tokenSha256 = previousTokenHash();
   const dirExists = fs.existsSync(CONFIG_DIR);
+  const cfg = flags.deleteAccount ? readConfig() : null;
+
+  // Say this before anything is touched. --delete-account with no credential left is
+  // a request we cannot honour, and finding that out after the hook is gone would
+  // leave someone believing their data was deleted when it was not.
+  if (flags.deleteAccount && !(cfg?.syncSecret && cfg?.machineId && cfg?.apiUrl)) {
+    console.error("  ✗ Cannot delete the account: no usable ~/.buddybrawl/config.json.");
+    console.error("    Deleting an account is authenticated with this install's sync");
+    console.error("    token, and that token is the only proof of ownership an install");
+    console.error("    has. Without it, email hi@buddybrawl.xyz instead — or sign in at");
+    console.error(`    https://${PROD_HOST}/dashboard and delete it there.`);
+    console.error("    Nothing was removed. Re-run without --delete-account to uninstall.");
+    exitWith(1);
+  }
 
   if (!registered.length && !dirExists) {
     console.log("  Nothing to remove — no BuddyBrawl hook is registered and");
@@ -832,9 +917,22 @@ async function cmdUninstall(flags = {}) {
     console.log(dirExists
       ? `  would delete      ${CONFIG_DIR} and everything in it`
       : `  would delete      nothing (${CONFIG_DIR} does not exist)`);
-    console.log(tokenSha256
-      ? `  would POST to     ${REVOKE_ENDPOINT}\n     sending sha256 of this install's token, so the server retires it`
-      : "  would revoke      nothing (no token found in config.json)");
+    // Printed in execution order, and honest about what the other steps become as a
+    // result: a preview that lists a request the real run skips is a preview that
+    // teaches the wrong thing about what this command does.
+    if (flags.deleteAccount) {
+      console.log(`  would POST to     ${buildDeleteUrl(cfg.apiUrl)}`);
+      console.log("     deleting your buddy, stats, gear and rank — permanently, and");
+      console.log("     first, while this install's token can still prove it is yours.");
+      console.log("     Battles you fought stay, with you replaced by 'Deleted player'");
+      console.log("     so opponents keep their own history.");
+      console.log("  would skip        the revoke call — the account's tokens are");
+      console.log("     deleted outright with it, which is stronger than revoking them");
+    } else {
+      console.log(tokenSha256
+        ? `  would POST to     ${REVOKE_ENDPOINT}\n     sending sha256 of this install's token, so the server retires it`
+        : "  would revoke      nothing (no token found in config.json)");
+    }
     console.log("\n  Run without --dry-run to remove it.\n");
     return;
   }
@@ -858,9 +956,47 @@ async function cmdUninstall(flags = {}) {
     console.log("  ✓ No BuddyBrawl Stop hook was registered");
   }
 
+  // ── 1b. Delete the account, if asked ───────────────────────────────────────
+  //
+  // Before the revoke and long before the delete, because this call authenticates
+  // with the live token — and both of those steps exist to destroy it. Get the order
+  // wrong and the request cannot be made at all.
+  //
+  // A failure here stops everything. Someone who typed --delete-account came for the
+  // deletion, not the uninstall; carrying on and removing their credential would take
+  // away the only means they had of asking again.
+  let accountDeleted = false;
+  if (flags.deleteAccount) {
+    process.stdout.write("  Deleting your account...");
+    try {
+      const res = await deleteAccount(cfg);
+      accountDeleted = res.deleted;
+      if (res.deleted) {
+        process.stdout.write(` done (${res.battlesAnonymized} battles kept, you anonymized)\n`);
+      } else {
+        process.stdout.write(` nothing to delete (${res.reason ?? "no account"})\n`);
+      }
+    } catch (e) {
+      process.stdout.write(` failed (${e.message})\n`);
+      console.error();
+      console.error("  Nothing was deleted, and nothing local was removed either —");
+      console.error("  your sync token is still in place, so you can try again.");
+      console.error("  Syncing has already stopped: the hook is unregistered.");
+      console.error("    → try again:      npx buddybrawl uninstall --delete-account");
+      console.error("    → uninstall only: npx buddybrawl uninstall");
+      console.error(`    → or sign in at   https://${PROD_HOST}/dashboard`);
+      console.error("    → or email        hi@buddybrawl.xyz\n");
+      exitWith(1);
+    }
+  }
+
   // ── 2. Revoke ──────────────────────────────────────────────────────────────
   let revokeError = null;
-  if (tokenSha256) {
+  if (accountDeleted) {
+    // The account's install tokens went with it — the rows are gone, not merely
+    // flagged revoked, which is strictly stronger than what this step achieves.
+    console.log("  ✓ Sync token deleted with the account");
+  } else if (tokenSha256) {
     process.stdout.write("  Deactivating this install's sync token...");
     try {
       const { revoked } = await revokeInstallToken(tokenSha256);
@@ -918,9 +1054,22 @@ async function cmdUninstall(flags = {}) {
   console.log("  BuddyBrawl is off this machine. Nothing was left behind");
   console.log("  outside the two paths above.");
   console.log();
-  console.log("  Your buddy, stats, gear and rank still exist on the server —");
-  console.log("  uninstalling stops the sync, it does not delete the account.");
-  console.log(`  To delete that too: hi@buddybrawl.xyz (see https://${PROD_HOST}/privacy)`);
+  if (accountDeleted) {
+    console.log("  Your account is deleted: buddy, stats, gear, rank and the");
+    console.log("  session records behind them. Battles you fought are still");
+    console.log("  in your opponents' history with you as 'Deleted player' —");
+    console.log("  their record of their own games does not depend on you");
+    console.log("  staying. Nothing left can be traced back to you.");
+    console.log();
+    console.log("  Starting fresh later gives you a new buddy, not the old one.");
+  } else {
+    console.log("  Your buddy, stats, gear and rank still exist on the server —");
+    console.log("  uninstalling stops the sync, it does not delete the account.");
+    console.log("  To delete that too, while this install can still prove it is");
+    console.log("  yours:  npx buddybrawl uninstall --delete-account");
+    console.log(`  Signed in on the web? https://${PROD_HOST}/dashboard has a button.`);
+    console.log(`  (details: https://${PROD_HOST}/privacy)`);
+  }
   console.log();
   console.log("  Changed your mind? npx buddybrawl@latest init\n");
 }
@@ -943,6 +1092,10 @@ function showHelp() {
     --sync-secret <secret> init: override production sync secret (self-hosted)
     --force                uninstall: delete local files even if the token
                            could not be deactivated
+    --delete-account       uninstall: also delete your buddy, stats, gear
+                           and rank from the server. Permanent. Run it
+                           BEFORE a plain uninstall — it needs this
+                           install's token to prove the account is yours.
     --version              Print the CLI version and exit
 
   Requires Claude Code — https://claude.ai/code
@@ -988,6 +1141,7 @@ function parseFlags(argv) {
     if (argv[i] === "--sync-secret" && argv[i + 1]) flags.syncSecret = argv[++i];
     if (argv[i] === "--dry-run") flags.dryRun = true;
     if (argv[i] === "--force")   flags.force  = true;
+    if (argv[i] === "--delete-account") flags.deleteAccount = true;
   }
   return flags;
 }
