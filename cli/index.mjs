@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { createHash, randomBytes } from "crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -232,15 +232,30 @@ function addHook(settings) {
   if (!settings.hooks) settings.hooks = {};
   if (!settings.hooks.Stop) settings.hooks.Stop = [];
   // Remove any stale entry pointing at our hook file before adding the current one.
+  //
+  // The drop-empty-entries rule below used to run over every entry unconditionally, so an
+  // entry the user had already left with an empty `hooks` array was deleted even though
+  // this installer never touched it — taking its matcher with it. That is the same silent
+  // settings damage isOurHookCommand() above was written to end, one rule further down:
+  // scoping *which hooks* we remove does not help if the entry cleanup is still global.
+  // An entry is only ours to drop when removing our own stale hook is what emptied it.
   const removed = [];
-  settings.hooks.Stop = settings.hooks.Stop.map((entry) => ({
-    ...entry,
-    hooks: (entry.hooks ?? []).filter((h) => {
+  const kept = [];
+  for (const entry of settings.hooks.Stop) {
+    const before = entry.hooks ?? [];
+    const after = before.filter((h) => {
       if (!isOurHookCommand(h.command)) return true;
       removed.push(h.command);
       return false;
-    }),
-  })).filter((entry) => (entry.hooks ?? []).length > 0);
+    });
+    // Nothing of ours in here. Push the original object through by reference so an entry
+    // without a `hooks` key does not gain an empty one, and key order survives the trip.
+    if (after.length === before.length) { kept.push(entry); continue; }
+    // It held nothing but our stale hook, so the wrapper is ours too — drop it.
+    if (after.length === 0) continue;
+    kept.push({ ...entry, hooks: after });
+  }
+  settings.hooks.Stop = kept;
   settings.hooks.Stop.push({
     matcher: "",
     hooks: [{ type: "command", command: HOOK_COMMAND }],
@@ -261,12 +276,38 @@ function secureConfigPermissions() {
     }
   }
 
-  // Windows: attempt icacls before giving up. Use %USERNAME% (expanded by cmd) but quote defensively.
+  // Windows: attempt icacls before giving up.
+  //
+  // This used to be execSync with the path interpolated into a command string and
+  // `%USERNAME%` left for cmd.exe to expand. It worked, and the injection risk was
+  // theoretical — CONFIG_DIR is built from os.homedir(), and Windows does not allow
+  // `"` or `&` in account names. But it was the only shell-string exec in the whole
+  // package, right next to a hook that runs `git` through execFileSync with an
+  // explicit argv array *and a comment saying that is the point*. An auditor greps
+  // for exec and reads the two side by side; the inconsistency costs more than the
+  // line was worth. No shell, no interpolation, nothing to quote.
+  //
+  // Absolute path rather than bare "icacls": a PATH entry the user does not control
+  // should not decide which binary gets to rewrite the ACL on the directory holding
+  // their sync token.
+  //
+  // USERNAME is used here as an ACL principal and nowhere else. It is never stored,
+  // never hashed into an identifier, and never transmitted — the install ID is
+  // random (see mintMachineId).
+  const user = process.env.USERNAME;
+  if (!user) return { status: "insecure", reason: "windows_no_username" };
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const icaclsPath = path.join(systemRoot, "System32", "icacls.exe");
+  const icacls = fs.existsSync(icaclsPath) ? icaclsPath : "icacls";
   try {
-    execSync(`icacls "${CONFIG_DIR}" /inheritance:r /grant:r "%USERNAME%:(F)" /T`, { stdio: "ignore" });
+    execFileSync(icacls, [CONFIG_DIR, "/inheritance:r", "/grant:r", `${user}:(F)`, "/T"], {
+      stdio: "ignore",
+      // A hung icacls would hang `npx buddybrawl init` with no output and no reason.
+      timeout: 10000,
+    });
     return { status: "secured", method: "icacls" };
   } catch {
-    return { status: "insecure", reason: "windows_no_acl" };
+    return { status: "insecure", reason: "windows_no_acl", user };
   }
 }
 
@@ -529,7 +570,11 @@ async function cmdInit(flags = {}) {
   } else if (sec.status === "insecure") {
     console.log(`  ✓ Config saved`);
     console.log("  ⚠  Windows: could not restrict file access. On shared machines, run:");
-    console.log(`     icacls "${CONFIG_DIR}" /inheritance:r /grant:r "%USERNAME%":(F) /T`);
+    // Print the resolved account name when we have one. `%USERNAME%` only expands
+    // in cmd.exe, so pasting this line into PowerShell — where `npx` is usually
+    // run — produced a command that granted rights to a literal "%USERNAME%".
+    const principal = sec.user ? `"${sec.user}"` : `"%USERNAME%"`;
+    console.log(`     icacls "${CONFIG_DIR}" /inheritance:r /grant:r ${principal}:(F) /T`);
   } else {
     console.log(`  ✓ Config saved`);
     console.log(`  ⚠  Could not secure permissions (${sec.reason}). Keep this file private.`);

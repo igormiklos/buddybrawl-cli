@@ -1,6 +1,6 @@
 {
   "name": "buddybrawl",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "Claude Code companion battle game — install the sync hook with npx buddybrawl init",
   "keywords": [
     "claude",
@@ -19,59 +19,22 @@
   "author": "igormiklos",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/igormiklos/buddybrawl.git"
+    "url": "git+https://github.com/igormiklos/buddybrawl-cli.git"
   },
   "bugs": {
+    "url": "https://github.com/igormiklos/buddybrawl-cli/issues",
     "email": "hi@buddybrawl.xyz"
   },
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "node": ">=18"
   },
-  "allowScripts": {
-    "esbuild@0.28.1": true,
-    "fsevents@2.3.3": true,
-    "sharp@0.35.3": true,
-    "unrs-resolver@1.11.1": true
-  },
   "files": [
     "cli/"
-  ],
-  "workspaces": [
-    "shared",
-    "backend",
-    "mobile",
-    "web"
   ],
   "bin": {
     "buddybrawl": "cli/index.mjs"
   },
-  "scripts": {
-    "backend": "npm run dev --workspace=backend",
-    "mobile": "npm run start --workspace=mobile",
-    "build:shared": "npm run build --workspace=@buddybrawl/shared",
-    "dev": "npm run build:shared && concurrently -n backend,mobile -c blue,green \"npm run backend\" \"npm run mobile\"",
-    "web:dev": "npm run build:shared && npm run dev --workspace=web",
-    "web:build": "npm run build:shared && npm run build --workspace=web",
-    "prepublishOnly": "node scripts/prepublish.mjs",
-    "init": "node cli/index.mjs init",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "verify:bots": "npm run build:shared && node tools/verify-bot-roster.mjs",
-    "verify:shared": "node tools/verify-shared-sync.mjs",
-    "audit:package": "node tools/audit-sandbox.mjs"
-  },
-  "devDependencies": {
-    "concurrently": "^9.2.1",
-    "vitest": "^3.0.0"
-  },
-  "overrides": {
-    "esbuild": "^0.28.1",
-    "postcss": "^8.5.24",
-    "sharp": "^0.35.3",
-    "next": {
-      "postcss": "^8.5.24",
-      "sharp": "^0.35.3"
-    }
-  }
+  "dependencies": {},
+  "scripts": {}
 }

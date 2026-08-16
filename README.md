@@ -94,7 +94,19 @@ No source code is transmitted. The hook ships as readable, unminified source —
 
 ## Security
 
-HTTPS-only sync endpoint, per-install tokens bound to your machine, and rate-limited sync/battle/forge endpoints. Security hardening applied June 2026 — see `CLAUDE.md` for the full breakdown.
+HTTPS-only sync endpoint, per-install tokens bound to your machine, and rate-limited sync/battle/forge endpoints. Full detail at https://www.buddybrawl.xyz/privacy.
+
+Don't take that on trust — the package is built to be checked. It ships **seven files, zero dependencies and no install scripts**, so `npm pack buddybrawl` downloads it without running anything and you can read 100% of what you'd be installing in a sitting:
+
+```
+npm pack buddybrawl
+tar -xzf buddybrawl-*.tgz
+cat package/package.json     # no dependencies, no scripts, no postinstall
+cat package/cli/index.mjs     # the installer — what npx runs
+cat package/cli/buddy-sync.mjs # the hook — what runs after each session
+```
+
+Point your own Claude Code at that folder and ask it what leaves your machine. The answer should match the table above; if it doesn't, that's a bug and we want to hear about it at hi@buddybrawl.xyz.
 
 The sync request never follows a redirect: if the endpoint answers with "go ask this other server instead", the sync fails rather than follows. A custom header like the sync token is *not* stripped when a redirect crosses to another host the way `Authorization` is, so following one would hand the token — and, on a 307, the whole payload — to a server you never configured, possibly over plain HTTP. The endpoint is also required to be a plain `https://` base URL: no embedded credentials, no query string, no fragment.
 

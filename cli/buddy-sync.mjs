@@ -197,6 +197,44 @@ const SPECIES = [
   "dragon","duck","ghost","goose","mushroom","octopus",
   "owl","penguin","rabbit","robot","snail","turtle",
 ];
+
+// Match each species as a whole word, optionally plural, and take the one named
+// earliest in the text. This replaces `SPECIES.find((s) => personality.includes(s))`,
+// which had two independent bugs:
+//
+//   1. Substring, not word. "cat" is inside dedicated, communicate, complicated,
+//      indicate, application and category; "owl" is inside growl, howl and prowl.
+//      "a dedicated turtle who loves clean code" resolved to cat.
+//   2. List order, not text order. `.find` returns the first species in THIS array
+//      that appears anywhere, so "cat" (index 4) beat "turtle" (index 17) even when
+//      turtle was the only species actually named. "a turtle raised by a dragon"
+//      resolved to dragon.
+//
+// Because the two compounded, a personality naming no species at all still matched —
+// almost any English sentence contains "cat" somewhere — so the failure was silent:
+// users got a confidently wrong companion rather than the no-match path below.
+//
+// Species names are plain lowercase ASCII, so they need no regex escaping. Patterns
+// are built once at module load rather than per call.
+const SPECIES_PATTERNS = SPECIES.map((species) => ({
+  species,
+  re: new RegExp(`\\b${species}s?\\b`),
+}));
+
+/** The species named earliest in `personality`, or null when none is named. */
+function findSpecies(personality) {
+  let found = null;
+  let foundAt = Infinity;
+  for (const { species, re } of SPECIES_PATTERNS) {
+    const m = re.exec(personality);
+    if (m && m.index < foundAt) {
+      foundAt = m.index;
+      found = species;
+    }
+  }
+  return found;
+}
+
 const RARITY_THRESHOLDS = [
   { rarity: "legendary", cutoff: 0.02 },
   { rarity: "epic",      cutoff: 0.10 },
@@ -240,9 +278,9 @@ function readClaudeJson() {
       typeof data.userID === "string" && data.userID ? data.userID : null;
     if (!data.companion?.name || !anthropicUserId) return { buddy: null, anthropicUserId };
 
-    // Species is mentioned explicitly in the personality text — more reliable than hash position
+    // Species is named explicitly in the personality text — more reliable than hash position
     const personality = (data.companion.personality || "").toLowerCase();
-    const species = SPECIES.find((s) => personality.includes(s));
+    const species = findSpecies(personality);
     if (!species) return { buddy: null, anthropicUserId };
 
     // Rarity and isShiny via hash (seed positions 1-2 consumed, 3 = rarity, 4 = isShiny)
