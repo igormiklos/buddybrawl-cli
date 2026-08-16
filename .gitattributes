@@ -1,0 +1,3 @@
+# The mirror must clone byte-identical to the npm tarball on every platform.
+# No line-ending conversion, in either direction, for anything.
+* -text

@@ -1,0 +1,23 @@
+Copyright (c) 2026 igormiklos. All Rights Reserved.
+
+This repository and its contents (source code, assets, and documentation) are
+proprietary and confidential. No permission is granted to copy, modify, merge,
+publish, distribute, sublicense, host, or sell this software or any derivative
+of it, in whole or in part, without prior written consent from the copyright
+holder.
+
+Limited license to end users:
+You may install and run the compiled package distributed under the name
+"buddybrawl" via the npm registry (`npx buddybrawl init`) for your own
+personal use, free of charge, exactly as distributed. This license does not
+extend to the source code in this repository, and does not include any right
+to copy, modify, redistribute, sublicense, or sell the software.
+
+Third-party content:
+The buddy ASCII art and species list distributed with this software are
+sourced from Anthropic's "claude-desktop-buddy" project
+(https://github.com/anthropics/claude-desktop-buddy) and remain the property
+of their respective owner, subject to that project's own license terms. No
+ownership of, or license to, that content is claimed or granted here.
+
+All other rights are reserved.
