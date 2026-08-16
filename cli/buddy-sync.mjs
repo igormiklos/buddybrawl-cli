@@ -699,10 +699,34 @@ async function main() {
         ),
     };
   }
+  // MCP tool names are the one field here that can carry somebody else's name.
+  //
+  // Claude Code's own tools are a closed, public set — Read, Edit, Bash, Glob — and
+  // say nothing about you. MCP tool names are user-authored and routinely built from
+  // the thing they connect to: mcp__acme_internal__read_secrets, mcp__bigclient_crm__*.
+  // Sending those verbatim meant a contractor's client list, or a company's internal
+  // service names, arriving here as a side effect of a game. It was disclosed and it
+  // was still more than we need: nothing scores or displays these names — stat growth
+  // uses num_tool_calls, files_modified and duration (see sessionActivityProfile), and
+  // tools_used is only ever counted. Raised by the 2026-08-16 external audit as the
+  // finding most likely to surprise someone who skimmed /privacy.
+  //
+  // Salted with pathSalt for the same reason the file tokens are: it never leaves the
+  // machine, so the same MCP server yields a different token for every user and the
+  // result cannot be reversed by guessing common names. The mcp__ prefix survives so
+  // the shape of a session is still legible — "five tools, two of them MCP" — which is
+  // all the count ever needed.
   if (session && Array.isArray(session.tools_used)) {
     session = {
       ...session,
-      tools_used: session.tools_used.slice(0, 50).map(String),
+      tools_used: session.tools_used
+        .slice(0, 50)
+        .map(String)
+        .map((t) =>
+          t.startsWith("mcp__")
+            ? "mcp__" + createHash("sha256").update(pathSalt + "\u0000" + t).digest("hex").slice(0, 12)
+            : t,
+        ),
     };
   }
 

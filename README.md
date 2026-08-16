@@ -98,7 +98,7 @@ Each sync sends:
 | `git user.email` and `user.name` | Stable identity across sessions |
 | Anthropic companion name, species, and Anthropic user ID — plus the rarity and shiny flag, derived from that ID on your machine rather than read from anywhere | Buddy identity |
 | Session duration, tool call count, message count, session ID | Stat growth |
-| The names of the tools used — `Read`, `Edit`, `Bash`, and any MCP tool names | Stat growth |
+| The names of the built-in tools used — `Read`, `Edit`, `Bash` and the like. MCP tool names are **not** sent: each one is replaced by `mcp__` plus a salted hash, so we can count how many you used without learning what they connect to | Stat growth |
 | A hashed token per file created or edited (used only to derive a count) — never the names or paths | Stat growth |
 | The total count of distinct files and the total count of distinct tools, as plain numbers — at most 100 tokens and 50 tool names are sent, so these keep a big session's stats accurate | Stat growth |
 | The random install ID from setup, re-sent each sync | Confirms the token is used from the machine it was issued to |

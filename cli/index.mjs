@@ -618,8 +618,9 @@ async function cmdInit(flags = {}) {
   console.log("      user ID — plus the rarity and shiny flag, which");
   console.log("      are derived from that ID on your machine");
   console.log("    • Session stats: duration, tool call count,");
-  console.log("      message count, and the names of the tools");
-  console.log("      used (including any MCP tool names)");
+  console.log("      message count, and the names of the built-in");
+  console.log("      tools used. MCP tool names are hashed on your");
+  console.log("      machine first — we count them, never read them");
   console.log("    • A count of files created or edited — paths are");
   console.log("      hashed to opaque tokens first, never the file or");
   console.log("      folder names themselves, plus the total count of");

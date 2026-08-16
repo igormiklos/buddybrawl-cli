@@ -9,8 +9,8 @@ Every file here that the package also ships is byte-identical to what
 `npm pack buddybrawl` downloads, because it *is* that tarball, extracted. Check it:
 
 ```bash
-npm pack buddybrawl@1.0.22
-tar -xzf buddybrawl-1.0.22.tgz
+npm pack buddybrawl@1.0.23
+tar -xzf buddybrawl-1.0.23.tgz
 git clone https://github.com/igormiklos/buddybrawl-cli.git mirror
 diff -r package mirror -x MIRROR.md -x SECURITY.md -x .gitattributes -x .git   # expect no output
 ```
@@ -31,7 +31,7 @@ The hook that runs on your machine has its own hash, shipped beside it:
 ```bash
 sha256sum package/cli/buddy-sync.mjs
 cat package/cli/hook-integrity.json
-# abb0c204aa8fa922508a52980066fe61c2405a9e7acc810365e129e9615a2c44
+# 21f19097ae6b155bb51b8fd419abbdf6da77e31c50d0a25b2d467e2f9409b470
 ```
 
 That hash is a corruption check, not tamper-proofing — it ships in the same
