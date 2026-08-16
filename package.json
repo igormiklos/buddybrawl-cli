@@ -1,6 +1,6 @@
 {
   "name": "buddybrawl",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "description": "Claude Code companion battle game — install the sync hook with npx buddybrawl init",
   "keywords": [
     "claude",

@@ -46,6 +46,10 @@ function mintPathSalt() {
 // server can retire that row. The raw secret is deliberately never sent here —
 // it belongs to the sync endpoint, and hashing keeps this host from ever seeing
 // a working credential. Returns null on a first install or an unreadable config.
+//
+// `uninstall` reads the same value for the same purpose: the token it is about to
+// delete is a token that should stop working, and the hash is the only part of it
+// this host is ever allowed to see.
 function previousTokenHash() {
   try {
     const prev = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
@@ -127,9 +131,39 @@ function isPrivateHost(hostname) {
   return !h.includes(".");
 }
 
+// ─── Exiting ─────────────────────────────────────────────────────────────────
+
+// Why this exists instead of process.exit().
+//
+// Every error path in both commands runs *after* a fetch, and calling process.exit()
+// while undici is still holding a keep-alive socket aborts the process on Windows:
+//
+//   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), ...\deps\uv\src\win\async.c
+//
+// The message the user needed still prints, and then that line lands underneath it and
+// the exit code is 127 rather than 1 — a crash report stapled to a handled error, which
+// is the worst possible way to tell someone their install was rate-limited. It is
+// reachable from init today: any non-2xx from the config endpoint (429 when a room
+// installs at once, 503 before the server has its env) takes that path. Found while
+// testing `uninstall` against an endpoint that was not deployed yet.
+//
+// Setting exitCode and unwinding instead lets the socket close on its own. The process
+// still exits promptly — measured at ~450ms against a live 404 — with the code we asked
+// for. Nothing between here and the dispatch catches broadly enough to swallow it.
+class ExitSignal extends Error {}
+
+function exitWith(code) {
+  process.exitCode = code;
+  throw new ExitSignal(`exit ${code}`);
+}
+
 // ─── Settings.json helpers ───────────────────────────────────────────────────
 
-function readSettings() {
+// `cmd` only names the command to retry in the two error messages. Both failures are
+// "this file is unusable and we will not write over it", which is as true of uninstall
+// as of init — but telling someone who ran uninstall to re-run init is how you get an
+// install they were trying to remove.
+function readSettings(cmd = "init") {
   if (!fs.existsSync(CLAUDE_SETTINGS)) return {};
   let parsed;
   try {
@@ -140,8 +174,8 @@ function readSettings() {
   } catch (e) {
     // The file exists but doesn't parse — writing would destroy the user's settings.
     console.error(`  ✗ ${CLAUDE_SETTINGS} exists but is not valid JSON (${e.message}).`);
-    console.error("    Fix the file (or remove it), then re-run npx buddybrawl init.");
-    process.exit(1);
+    console.error(`    Fix the file (or remove it), then re-run npx buddybrawl ${cmd}.`);
+    exitWith(1);
   }
   // Valid JSON is not the same as a usable settings file. `null`, a bare string and a
   // number all parse cleanly and then blew up in addHook with an unhandled
@@ -152,8 +186,8 @@ function readSettings() {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     const kind = parsed === null ? "null" : Array.isArray(parsed) ? "an array" : `a ${typeof parsed}`;
     console.error(`  ✗ ${CLAUDE_SETTINGS} is valid JSON but contains ${kind}, not a settings object.`);
-    console.error("    Fix the file (or remove it), then re-run npx buddybrawl init.");
-    process.exit(1);
+    console.error(`    Fix the file (or remove it), then re-run npx buddybrawl ${cmd}.`);
+    exitWith(1);
   }
   return parsed;
 }
@@ -228,20 +262,25 @@ function isOurHookCommand(command) {
   return norm(command).includes(norm(HOOK_DEST));
 }
 
-function addHook(settings) {
-  if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks.Stop) settings.hooks.Stop = [];
-  // Remove any stale entry pointing at our hook file before adding the current one.
-  //
-  // The drop-empty-entries rule below used to run over every entry unconditionally, so an
-  // entry the user had already left with an empty `hooks` array was deleted even though
-  // this installer never touched it — taking its matcher with it. That is the same silent
-  // settings damage isOurHookCommand() above was written to end, one rule further down:
-  // scoping *which hooks* we remove does not help if the entry cleanup is still global.
-  // An entry is only ours to drop when removing our own stale hook is what emptied it.
+// Take every hook of ours out of a Stop list, and report what came out.
+//
+// Shared by addHook (replacing a stale entry) and removeHook (taking ours out for
+// good) so the two rules below exist in exactly one place. They were both written in
+// response to real settings damage, and a second hand-kept copy is how one of them
+// quietly stops applying to one of the two commands.
+//
+//   1. Only hooks pointing at HOOK_DEST are ours — see isOurHookCommand.
+//   2. The drop-empty-entries rule used to run over every entry unconditionally, so an
+//      entry the user had already left with an empty `hooks` array was deleted even
+//      though this installer never touched it — taking its matcher with it. That is the
+//      same silent settings damage isOurHookCommand was written to end, one rule
+//      further down: scoping *which hooks* we remove does not help if the entry cleanup
+//      is still global. An entry is only ours to drop when removing our own hook is
+//      what emptied it.
+function stripOurHooks(stops) {
   const removed = [];
   const kept = [];
-  for (const entry of settings.hooks.Stop) {
+  for (const entry of stops) {
     const before = entry.hooks ?? [];
     const after = before.filter((h) => {
       if (!isOurHookCommand(h.command)) return true;
@@ -251,15 +290,52 @@ function addHook(settings) {
     // Nothing of ours in here. Push the original object through by reference so an entry
     // without a `hooks` key does not gain an empty one, and key order survives the trip.
     if (after.length === before.length) { kept.push(entry); continue; }
-    // It held nothing but our stale hook, so the wrapper is ours too — drop it.
+    // It held nothing but our hook, so the wrapper is ours too — drop it.
     if (after.length === 0) continue;
     kept.push({ ...entry, hooks: after });
   }
+  return { kept, removed };
+}
+
+/** Every registered hook command of ours, for reporting before anything is touched. */
+function ourHooksIn(settings) {
+  const stops = settings?.hooks?.Stop;
+  if (!Array.isArray(stops)) return [];
+  return stops
+    .flatMap((entry) => entry?.hooks ?? [])
+    .map((h) => h?.command)
+    .filter((c) => isOurHookCommand(c));
+}
+
+function addHook(settings) {
+  if (!settings.hooks) settings.hooks = {};
+  if (!settings.hooks.Stop) settings.hooks.Stop = [];
+  // Remove any stale entry pointing at our hook file before adding the current one.
+  const { kept, removed } = stripOurHooks(settings.hooks.Stop);
   settings.hooks.Stop = kept;
   settings.hooks.Stop.push({
     matcher: "",
     hooks: [{ type: "command", command: HOOK_COMMAND }],
   });
+  return { settings, removed };
+}
+
+// The inverse of addHook: take ours out and put nothing back.
+//
+// Empty containers are pruned rather than left as `"Stop": []` inside `"hooks": {}`.
+// An uninstall that leaves scaffolding behind is one a reader cannot tell apart from a
+// half-finished one, and an absent key and an empty array mean the same thing to Claude
+// Code. Anything the user or another tool put in Stop keeps the key alive.
+function removeHook(settings) {
+  const stops = settings?.hooks?.Stop;
+  if (!Array.isArray(stops)) return { settings, removed: [] };
+  const { kept, removed } = stripOurHooks(stops);
+  if (kept.length) {
+    settings.hooks.Stop = kept;
+  } else {
+    delete settings.hooks.Stop;
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  }
   return { settings, removed };
 }
 
@@ -341,7 +417,7 @@ function installHook(hookSource, expectedHash) {
         console.error("  ✗ Hook integrity check failed — the file written to disk does not match the published hash.");
         console.error("    The incomplete copy has been discarded and your existing install left untouched.");
         console.error("    Re-run npx buddybrawl init to retry.");
-        process.exit(1);
+        exitWith(1);
       }
     }
 
@@ -364,7 +440,7 @@ function installHook(hookSource, expectedHash) {
           console.error(`  ✗ Could not install the sync script (${err.code || err.message}).`);
           console.error("    A Claude Code session may be running the current hook right now.");
           console.error("    Close your Claude Code sessions, then re-run npx buddybrawl init.");
-          process.exit(1);
+          exitWith(1);
         }
         sleepSync(120);
       }
@@ -409,6 +485,49 @@ async function fetchProdConfig(machineId, previousTokenSha256) {
       throw new Error("Non-HTTPS apiUrl in config response");
     }
     return cfg;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── Token revocation ────────────────────────────────────────────────────────
+
+const REVOKE_ENDPOINT = `https://${PROD_HOST}/api/revoke-install`;
+
+// Retire this install's sync token server-side.
+//
+// The only endpoint besides the config fetch that this CLI ever talks to, and it
+// exists because uninstalling without it was a lie by omission: deleting the folder
+// and the hook line stops the machine from syncing, and leaves a credential that
+// still works for anyone who copied config.json before it went. Re-running init was
+// the only thing that ever retired a token, which made the *documented* removal path
+// the one path that never did.
+//
+// Sends sha256(token), never the token: possession of the hash is the authority to
+// revoke (see supabase/migrations/20260815090000_revoke_install_token.sql), so this
+// needs no credential of its own and hands the config host nothing usable. Same
+// redirect:"error" rule as everywhere else — a bounce would relay the hash to a host
+// the user never configured.
+//
+// Throws on anything that is not a clean answer. The caller has to know the
+// difference, because it decides what is safe to delete afterwards.
+async function revokeInstallToken(tokenSha256) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(REVOKE_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": `buddybrawl-cli/${PKG_VERSION}`,
+      },
+      body: JSON.stringify({ tokenSha256, cliVersion: PKG_VERSION }),
+      signal: controller.signal,
+      redirect: "error",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    return { revoked: body?.revoked === true };
   } finally {
     clearTimeout(timer);
   }
@@ -459,6 +578,36 @@ async function cmdInit(flags = {}) {
   // clean — nothing has changed yet. Found by the 2026-08-15 external audit.
   const settings = readSettings();
 
+  // --dry-run: say exactly what would change, change nothing, and — the part that
+  // matters — reach no network at all. It has to sit above the config fetch rather
+  // than inside it: that request *mints a token* and retires the previous one, so a
+  // dry run that called it would leave the account in a state a dry run has no
+  // business creating. Everything below this point either writes or registers.
+  if (flags.dryRun) {
+    const already = hasHook(settings);
+    console.log("  Dry run — nothing is written, no token is issued, no request is sent.\n");
+    console.log(`  would POST to ${CONFIG_ENDPOINT}`);
+    console.log("     sending a random install ID and the CLI version" +
+      (previousTokenHash() ? "," : "."));
+    if (previousTokenHash()) {
+      console.log("     plus the sha256 of the token in your existing config, so the");
+      console.log("     server can retire it. Never the token itself.");
+    }
+    console.log(`  would write   ${HOOK_DEST}`);
+    console.log("     the sync hook, copied from this package and hash-checked");
+    console.log(`  would write   ${CONFIG_FILE}`);
+    console.log("     endpoint URL, sync token, install ID, path salt (owner-only)");
+    console.log(`  would ${already ? "keep the existing" : "add one"} Stop hook entry in ${CLAUDE_SETTINGS}:`);
+    console.log(`     ${HOOK_COMMAND}`);
+    const stale = ourHooksIn(settings).filter((c) => c !== HOOK_COMMAND);
+    for (const cmd of stale) {
+      console.log(`  would replace a stale BuddyBrawl entry (${cmd})`);
+    }
+    console.log("\n  Nothing else on this machine is read, written or registered.");
+    console.log("  Run without --dry-run to install.\n");
+    return;
+  }
+
   let apiUrl     = flags.apiUrl;
   let syncSecret = flags.syncSecret;
   const machineId = mintMachineId();
@@ -487,7 +636,7 @@ async function cmdInit(flags = {}) {
       } else {
         console.error(`  Could not reach ${PROD_HOST}. Check your internet connection and try again.`);
       }
-      process.exit(1);
+      exitWith(1);
     }
   }
 
@@ -497,7 +646,7 @@ async function cmdInit(flags = {}) {
   if (!isValidHttpsUrl(apiUrl)) {
     console.error("  ✗ Refusing this apiUrl. It must be an https:// base URL with no credentials, query string or fragment.");
     console.error("    If you are self-hosting for testing, run init then manually edit ~/.buddybrawl/config.json.");
-    process.exit(1);
+    exitWith(1);
   }
 
   // A private or loopback target is fine when the user asked for it, and never fine when
@@ -507,7 +656,7 @@ async function cmdInit(flags = {}) {
     console.error(`    ${PROD_HOST} returned it, and syncs would be sent inside your own network.`);
     console.error("    Nothing was installed. If you meant to self-host, pass it yourself:");
     console.error("      npx buddybrawl init --api-url <url> --sync-secret <secret>");
-    process.exit(1);
+    exitWith(1);
   }
 
   hr("Step 1: Sync hook");
@@ -515,7 +664,7 @@ async function cmdInit(flags = {}) {
   const hookSource = path.join(__dirname, "buddy-sync.mjs");
   if (!fs.existsSync(hookSource)) {
     console.error(`  buddy-sync.mjs not found at ${hookSource}`);
-    process.exit(1);
+    exitWith(1);
   }
 
   fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
@@ -536,7 +685,7 @@ async function cmdInit(flags = {}) {
       console.error("  ✗ Hook integrity check failed — package file does not match published hash.");
       console.error("    This may indicate a corrupted download. Re-run npx buddybrawl init to retry.");
       console.error("    Your existing install was left untouched.");
-      process.exit(1);
+      exitWith(1);
     }
   }
 
@@ -636,21 +785,173 @@ async function cmdInit(flags = {}) {
   console.log("  upgrade or switch Node (nvm/fnm), re-run npx buddybrawl init.\n");
 }
 
+// ─── Uninstall command ───────────────────────────────────────────────────────
+
+// Undo everything init did, in the order that leaves the safest partial state at
+// every point it can fail:
+//
+//   1. unregister the hook   — the step that actually stops data leaving the machine
+//   2. revoke the token      — needs config.json, so it has to happen before step 3
+//   3. delete ~/.buddybrawl  — the point of no return for step 2
+//
+// Any other order has a failure mode that is worse than not running it. Deleting the
+// folder first destroys the only copy of the secret this machine can hash, so the
+// token can never be retired. Revoking first and then failing to unregister leaves a
+// registered hook whose every sync 403s. And a hook left pointing at a deleted script
+// errors at the end of every Claude Code session, which is a worse thing to leave
+// behind than the install itself.
+//
+// There is no confirmation prompt. Typing `uninstall` is the confirmation, and the
+// only irreversible part — the token — is reissued by re-running init.
+async function cmdUninstall(flags = {}) {
+  console.log("\n  BuddyBrawl — Uninstall");
+  console.log("  Removes the Claude Code hook, the local config, and this");
+  console.log("  install's sync token.\n");
+
+  // Validated first, for the same reason init reads it first: if this file is
+  // unusable we are not going to rewrite it, and nothing should have changed by the
+  // time we say so.
+  const settings = readSettings("uninstall");
+  const registered = ourHooksIn(settings);
+  const tokenSha256 = previousTokenHash();
+  const dirExists = fs.existsSync(CONFIG_DIR);
+
+  if (!registered.length && !dirExists) {
+    console.log("  Nothing to remove — no BuddyBrawl hook is registered and");
+    console.log(`  ${CONFIG_DIR} does not exist.\n`);
+    return;
+  }
+
+  if (flags.dryRun) {
+    console.log("  Dry run — nothing is removed and no request is sent.\n");
+    if (registered.length) {
+      for (const cmd of registered) console.log(`  would unregister  ${cmd}`);
+    } else {
+      console.log("  would unregister  nothing (no BuddyBrawl Stop hook registered)");
+    }
+    console.log(dirExists
+      ? `  would delete      ${CONFIG_DIR} and everything in it`
+      : `  would delete      nothing (${CONFIG_DIR} does not exist)`);
+    console.log(tokenSha256
+      ? `  would POST to     ${REVOKE_ENDPOINT}\n     sending sha256 of this install's token, so the server retires it`
+      : "  would revoke      nothing (no token found in config.json)");
+    console.log("\n  Run without --dry-run to remove it.\n");
+    return;
+  }
+
+  // ── 1. Unregister ──────────────────────────────────────────────────────────
+  if (registered.length) {
+    const { settings: updated, removed } = removeHook(settings);
+    writeSettings(updated);
+    // Same verification read init does after registering. A write that silently did
+    // not take is the one failure that would leave the user believing syncing stopped
+    // when it has not.
+    if (ourHooksIn(readSettings("uninstall")).length) {
+      console.error("  ✗ Wrote settings.json but a BuddyBrawl hook entry is still there.");
+      console.error(`    Remove the buddy-sync line from ${CLAUDE_SETTINGS} by hand.`);
+      console.error("    Nothing else was removed.");
+      exitWith(1);
+    }
+    for (const cmd of removed) console.log(`  ✓ Claude Code Stop hook unregistered (${cmd})`);
+    console.log("  ✓ No further session data will be sent from this machine");
+  } else {
+    console.log("  ✓ No BuddyBrawl Stop hook was registered");
+  }
+
+  // ── 2. Revoke ──────────────────────────────────────────────────────────────
+  let revokeError = null;
+  if (tokenSha256) {
+    process.stdout.write("  Deactivating this install's sync token...");
+    try {
+      const { revoked } = await revokeInstallToken(tokenSha256);
+      // `false` is not a failure: a self-hosted install, a token already retired by a
+      // later init, or one this server never issued all land here, and all three mean
+      // the same thing to the user — nothing of theirs is left live.
+      process.stdout.write(revoked ? " done\n" : " already inactive\n");
+    } catch (e) {
+      revokeError = e.message;
+      process.stdout.write(` failed (${e.message})\n`);
+    }
+  } else if (dirExists) {
+    console.log("  ✓ No sync token found in config.json (nothing to deactivate)");
+  }
+
+  // ── 3. Delete ──────────────────────────────────────────────────────────────
+  //
+  // Stop here if the token could not be retired. config.json holds the only copy of
+  // the secret this machine can hash, so deleting it now would make the token
+  // permanently unrevocable — and there is no hurry: step 1 already stopped the
+  // syncing, which is what the user came for.
+  if (revokeError && !flags.force) {
+    console.log();
+    console.log(`  Stopped before deleting ${CONFIG_DIR}.`);
+    console.log("  Syncing has already stopped. What is left is the token itself,");
+    console.log("  still live on the server, and config.json is the only proof this");
+    console.log("  machine can offer that the token is yours to retire.");
+    console.log("    → back online?  npx buddybrawl uninstall");
+    console.log("    → delete anyway: npx buddybrawl uninstall --force");
+    console.log(`    → or email hi@buddybrawl.xyz quoting ${tokenSha256}`);
+    console.log("      (that is a hash, not the token — it is safe to send)\n");
+    exitWith(1);
+  }
+
+  if (dirExists) {
+    try {
+      // Everything in the folder, including a hand-written buddy.json: this is the
+      // same "delete the ~/.buddybrawl folder" the privacy page has always described.
+      fs.rmSync(CONFIG_DIR, { recursive: true, force: true });
+      console.log(`  ✓ Removed ${CONFIG_DIR}`);
+    } catch (e) {
+      console.error(`  ✗ Could not remove ${CONFIG_DIR} (${e.code || e.message}).`);
+      console.error("    The hook is already unregistered, so nothing is syncing.");
+      console.error("    Delete the folder by hand to finish.");
+      exitWith(1);
+    }
+  }
+
+  hr("Done");
+  if (revokeError) {
+    console.log("  ⚠ The sync token could not be deactivated and its local copy is");
+    console.log("    now gone. Email hi@buddybrawl.xyz if you want it retired.");
+    console.log();
+  }
+  console.log("  BuddyBrawl is off this machine. Nothing was left behind");
+  console.log("  outside the two paths above.");
+  console.log();
+  console.log("  Your buddy, stats, gear and rank still exist on the server —");
+  console.log("  uninstalling stops the sync, it does not delete the account.");
+  console.log(`  To delete that too: hi@buddybrawl.xyz (see https://${PROD_HOST}/privacy)`);
+  console.log();
+  console.log("  Changed your mind? npx buddybrawl@latest init\n");
+}
+
 // ─── Help ────────────────────────────────────────────────────────────────────
 
 function showHelp() {
   console.log(`
-  Usage: npx buddybrawl init [options]
+  Usage: npx buddybrawl <command> [options]
 
-  Installs the BuddyBrawl sync hook into Claude Code.
-  Requires Claude Code — https://claude.ai/code
+  Commands:
+    init         Install the BuddyBrawl sync hook into Claude Code
+    uninstall    Remove the hook, the local config, and this install's
+                 sync token (alias: remove)
 
   Options:
-    --api-url <url>        Override production API URL (self-hosted)
-    --sync-secret <secret> Override production sync secret (self-hosted)
+    --dry-run              Print what would change, change nothing,
+                           send no request. Works with both commands.
+    --api-url <url>        init: override production API URL (self-hosted)
+    --sync-secret <secret> init: override production sync secret (self-hosted)
+    --force                uninstall: delete local files even if the token
+                           could not be deactivated
+    --version              Print the CLI version and exit
 
-  Example:
+  Requires Claude Code — https://claude.ai/code
+  Security policy and reports — hi@buddybrawl.xyz
+
+  Examples:
     npx buddybrawl init
+    npx buddybrawl init --dry-run
+    npx buddybrawl uninstall
 `);
 }
 
@@ -661,23 +962,44 @@ function showHelp() {
 if (typeof fetch === "undefined") {
   console.error(`  ✗ BuddyBrawl needs Node 18 or newer — you're running ${process.version}.`);
   console.error("    Upgrade Node (https://nodejs.org), then re-run npx buddybrawl init.");
+  // The one place process.exit stays: this is module top level, so exitWith's throw
+  // would print an ExitSignal stack under the message instead of ending quietly. It is
+  // also the one exit that cannot have a socket open behind it — there is no fetch on
+  // this Node at all, which is the whole point of the branch.
   process.exit(1);
 }
 
 const args = process.argv.slice(2);
 const cmd  = args[0];
 
+// An ExitSignal has already printed everything the user needs and set the exit code —
+// re-printing it would put a stack trace under a message written to avoid one. Anything
+// else really is unexpected and gets shown in full.
+function fatal(e) {
+  if (e instanceof ExitSignal) return;
+  console.error(e);
+  process.exitCode = 1;
+}
+
 function parseFlags(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--api-url"     && argv[i + 1]) flags.apiUrl     = argv[++i];
     if (argv[i] === "--sync-secret" && argv[i + 1]) flags.syncSecret = argv[++i];
+    if (argv[i] === "--dry-run") flags.dryRun = true;
+    if (argv[i] === "--force")   flags.force  = true;
   }
   return flags;
 }
 
-if (cmd === "init") {
-  cmdInit(parseFlags(args)).catch((e) => { console.error(e); process.exit(1); });
+if (cmd === "--version" || cmd === "-v" || cmd === "version") {
+  // SECURITY.md asks reporters for the version, so there has to be one command that
+  // prints it without installing anything or reaching the network.
+  console.log(PKG_VERSION);
+} else if (cmd === "init") {
+  cmdInit(parseFlags(args)).catch(fatal);
+} else if (cmd === "uninstall" || cmd === "remove") {
+  cmdUninstall(parseFlags(args)).catch(fatal);
 } else {
   showHelp();
 }

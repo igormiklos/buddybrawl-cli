@@ -5,19 +5,21 @@ Claude Code hook, and nothing else. It exists so anyone deciding whether to
 install can compare the bytes npm serves against readable source, without taking
 anyone's word for it.
 
-Every file here except this one is byte-identical to what `npm pack buddybrawl`
-downloads, because it *is* that tarball, extracted. Check it:
+Every file here that the package also ships is byte-identical to what
+`npm pack buddybrawl` downloads, because it *is* that tarball, extracted. Check it:
 
 ```bash
-npm pack buddybrawl@1.0.20
-tar -xzf buddybrawl-1.0.20.tgz
+npm pack buddybrawl@1.0.21
+tar -xzf buddybrawl-1.0.21.tgz
 git clone https://github.com/igormiklos/buddybrawl-cli.git mirror
-diff -r package mirror -x MIRROR.md -x .gitattributes -x .git   # expect no output
+diff -r package mirror -x MIRROR.md -x SECURITY.md -x .gitattributes -x .git   # expect no output
 ```
 
-`MIRROR.md` and `.gitattributes` are the only two files here that the tarball
-does not contain: this page, and the rule that stops Git rewriting line endings
-on checkout so the comparison above works on Windows too.
+`MIRROR.md`, `SECURITY.md` and `.gitattributes` are the only three files here
+that the tarball does not contain: this page, the security policy (GitHub reads
+that one from the repository root, and an npm package is not a repository), and
+the rule that stops Git rewriting line endings on checkout so the comparison
+above works on Windows too. Everything else is package bytes.
 
 `npm pack` downloads without executing: no install scripts run, nothing is
 unpacked into `node_modules`, and your `package.json` is untouched. The package
@@ -61,6 +63,20 @@ computer is in this repo.
 The mirror is regenerated and force-updated on each release, so pull requests
 here can't be merged. Send bugs, and especially anything that looks like a
 privacy or security problem, to **hi@buddybrawl.xyz**.
+
+Security reports have their own page — [`SECURITY.md`](SECURITY.md) covers
+scope, response times and safe harbour.
+
+## Removing it
+
+```bash
+npx buddybrawl uninstall
+```
+
+Unregisters the Claude Code hook, deletes `~/.buddybrawl`, and asks the server to
+retire this install's sync token. `--dry-run` prints what it would do and touches
+nothing. The code for all of it is `cmdUninstall` in `cli/index.mjs`, in this
+repository, so you can read what it does before you run it.
 
 ## License
 

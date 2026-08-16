@@ -19,6 +19,18 @@ npx buddybrawl init
 
 60 seconds. Hooks into Claude Code. Syncs your buddy automatically as you work — no need to close the session.
 
+Want to see what it touches before it touches anything? `npx buddybrawl init --dry-run` prints every file it would write and the hook line it would register, without writing, registering or requesting anything.
+
+## Uninstall
+
+```
+npx buddybrawl uninstall
+```
+
+Unregisters the Claude Code hook, deletes `~/.buddybrawl`, and asks the server to deactivate this install's sync token — the last one matters, and doing it by hand isn't possible. `--dry-run` works here too.
+
+Uninstalling stops the sync. Your buddy, stats, gear and rank stay on the server; to delete those as well, see [Privacy](#privacy).
+
 ## How it works
 
 **01 — Code with Claude**  
@@ -67,6 +79,9 @@ Dragon lands 47 damage. Rabbit is at 53 HP.
 - **Play:** https://www.buddybrawl.xyz
 - **Leaderboard:** https://www.buddybrawl.xyz/leaderboard
 - **npm:** https://www.npmjs.com/package/buddybrawl
+- **Source of what installs on your machine:** https://github.com/igormiklos/buddybrawl-cli — the published package, extracted, byte-for-byte
+- **Security policy:** https://github.com/igormiklos/buddybrawl-cli/security/policy
+- **Privacy:** https://www.buddybrawl.xyz/privacy
 
 Built for Claude Code users. Your buddy is your real Claude Code companion.
 
@@ -91,6 +106,10 @@ Each sync sends:
 Setup itself sends only a random install ID and the CLI version — plus, if you're re-running it over an existing install, a one-way hash of the sync token being replaced, so the old one can be switched off instead of staying valid forever. The token itself never goes to that host.
 
 No source code is transmitted. The hook ships as readable, unminified source — after install, `cli/buddy-sync.mjs` inside the package is the exact file that runs on your machine, and you can read every line of it.
+
+**Stopping, and deleting.** `npx buddybrawl uninstall` unregisters the hook, deletes `~/.buddybrawl`, and asks the server to deactivate this install's sync token so it stops working even for someone who copied it. Deleting the folder by hand does the first two but not the third — the token is the part you can't retire yourself, which is why the command exists.
+
+What that leaves is the account: your buddy, its stats, gear and rank, and the session records those were computed from. Those stay on the server, because uninstalling one machine is not the same as quitting — they're kept for as long as the account exists, with no automatic expiry. To delete all of it, email hi@buddybrawl.xyz from the address on the account. It's done within 30 days and you get a confirmation when it is.
 
 ## Security
 
